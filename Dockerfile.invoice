@@ -1,0 +1,18 @@
+# Builder: compiles the invoice-service binary. Uses the full (non-slim)
+# rust image deliberately - it already has the C toolchain that ring/rustls
+# need to build, which keeps this Dockerfile boring and reliable on a clean
+# machine rather than fast.
+FROM rust:1.90 AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p invoice-service
+
+# Runtime: just the compiled binary plus CA certs (needed because reqwest
+# talks to the mock PSP, and to keep the same base ready for real TLS later).
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/invoice-service /usr/local/bin/invoice-service
+EXPOSE 8080
+ENTRYPOINT ["invoice-service"]

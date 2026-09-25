@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["invoice-service", "mock-psp"]
+
+[profile.release]
+opt-level = 1
+debug = false

@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dodo
+      POSTGRES_PASSWORD: dodo
+      POSTGRES_DB: dodo_invoice
+    ports:
+      # Host-side port only, for optional local psql access - shifted off
+      # 5432 because a dev machine commonly already has a local Postgres
+      # listening there. Containers talk to each other via the internal
+      # "postgres:5432" address below, which this does not affect.
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dodo -d dodo_invoice"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  mock-psp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-psp
+    environment:
+      PORT: "9000"
+    ports:
+      - "9000:9000"
+
+  invoice-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.invoice
+    environment:
+      DATABASE_URL: postgres://dodo:dodo@postgres:5432/dodo_invoice
+      PORT: "8080"
+      PSP_BASE_URL: http://mock-psp:9000
+      # How long the API waits for the mock PSP before detaching and
+      # returning 202/pending. Shorter than tok_timeout's 30s on purpose -
+      # see DESIGN.md section 3(b).
+      PSP_SYNC_WAIT_MS: "3000"
+      PSP_HARD_TIMEOUT_MS: "35000"
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-psp:
+        condition: service_started
+
+volumes:
+  pgdata:

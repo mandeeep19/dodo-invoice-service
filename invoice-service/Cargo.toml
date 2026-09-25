@@ -1,0 +1,39 @@
+[package]
+name = "invoice-service"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "invoice_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "invoice-service"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["json", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace", "request-id", "util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+argon2 = "0.5"
+thiserror = "1"
+async-trait = "0.1"
+dotenvy = "0.15"
+
+[dev-dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+futures = "0.3"

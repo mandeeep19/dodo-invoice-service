@@ -1,0 +1,381 @@
+openapi: 3.0.3
+info:
+  title: Dodo Payments - Invoice & Payment Service
+  version: "1.0.0"
+  description: |
+    Minimal invoice and payment service. A business authenticates with an
+    API key, creates customers and invoices, and accepts payments through a
+    mock PSP. See DESIGN.md for the state machine, concurrency, and webhook
+    design behind these endpoints.
+
+servers:
+  - url: http://localhost:8080
+
+components:
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    BadRequest:
+      description: Invalid request body
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found (or not owned by the authenticated business)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Invalid state transition
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      description: "API key in the form sk_live_<hex>, obtained from POST /businesses."
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: invoice_not_found
+            message:
+              type: string
+              example: no such invoice
+
+    Customer:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string }
+        created_at: { type: string, format: date-time }
+
+    LineItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid }
+        description: { type: string }
+        quantity: { type: integer }
+        unit_amount_cents: { type: integer, description: "Integer cents. Never a float." }
+        amount_cents: { type: integer, description: "quantity * unit_amount_cents, computed server-side." }
+
+    Invoice:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        state:
+          type: string
+          enum: [draft, open, paid, void, uncollectible]
+        currency: { type: string, example: USD }
+        total_cents: { type: integer, description: "Server-computed sum of line items. A client-supplied total is never accepted." }
+        due_date: { type: string, format: date, nullable: true }
+        line_items:
+          type: array
+          items: { $ref: "#/components/schemas/LineItem" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PaymentAttempt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, succeeded, failed] }
+        card_token: { type: string }
+        failure_code: { type: string, nullable: true }
+        psp_ref: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /businesses:
+    post:
+      summary: Create a business and its first API key
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: Business created. The api_key field is shown exactly once.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  business_id: { type: string, format: uuid }
+                  name: { type: string }
+                  api_key: { type: string, example: sk_live_ab12cd34... }
+
+  /customers:
+    post:
+      summary: Create a customer scoped to the authenticated business
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email]
+              properties:
+                name: { type: string }
+                email: { type: string }
+      responses:
+        "201":
+          description: Customer created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Customer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    get:
+      summary: List customers for the authenticated business
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Customer" }
+
+  /customers/{id}:
+    get:
+      summary: Get a customer by id
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Customer" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invoices:
+    post:
+      summary: Create an invoice. The server computes total_cents; a client-supplied total is never trusted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, line_items]
+              properties:
+                customer_id: { type: string, format: uuid }
+                due_date: { type: string, format: date, nullable: true }
+                line_items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [description, quantity, unit_amount_cents]
+                    properties:
+                      description: { type: string }
+                      quantity: { type: integer, minimum: 1 }
+                      unit_amount_cents: { type: integer, minimum: 0 }
+      responses:
+        "201":
+          description: Invoice created in the 'draft' state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      summary: List invoices for the authenticated business, optionally filtered by state
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [draft, open, paid, void, uncollectible] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Invoice" }
+
+  /invoices/{id}:
+    get:
+      summary: Get an invoice by id, including its line items
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /invoices/{id}/finalize:
+    post:
+      summary: draft -> open. Rejected unless the invoice is currently 'draft'.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Invoice is now 'open'
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /invoices/{id}/void:
+    post:
+      summary: "{draft, open} -> void. Terminal; rejected from 'paid' or already-terminal states."
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Invoice is now 'void'
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /invoices/{id}/mark-uncollectible:
+    post:
+      summary: open -> uncollectible. Terminal; only legal from 'open'.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Invoice is now 'uncollectible'
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invoice" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /invoices/{id}/pay:
+    post:
+      summary: >
+        Attempt payment. Requires Idempotency-Key. Only legal when the
+        invoice is 'open'. See DESIGN.md section 3 for the full concurrency,
+        idempotency, and PSP-failure handling this endpoint implements.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [card_token]
+              properties:
+                card_token: { type: string, example: tok_success }
+      responses:
+        "200":
+          description: The PSP answered within the synchronous wait window; the attempt is resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attempt_id: { type: string, format: uuid }
+                  invoice_id: { type: string, format: uuid }
+                  status: { type: string, enum: [succeeded, failed] }
+                  failure_code: { type: string, nullable: true }
+                  psp_ref: { type: string, nullable: true }
+        "202":
+          description: The PSP has not answered yet (e.g. tok_timeout). Poll GET .../payment-attempts/{attempt_id} for the final result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attempt_id: { type: string, format: uuid }
+                  invoice_id: { type: string, format: uuid }
+                  status: { type: string, enum: [pending] }
+                  message: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >
+            Invoice is not payable (wrong state, already paid, or another
+            attempt is already in flight for this invoice).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Idempotency-Key was reused with a different request body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /invoices/{id}/payment-attempts/{attempt_id}:
+    get:
+      summary: Poll a payment attempt's status (used after a 202 response from /pay)
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - name: attempt_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentAttempt" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /webhook-endpoints:
+    post:
+      summary: Register a webhook endpoint URL for the authenticated business
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, example: "https://example.com/webhooks/dodo" }
+      responses:
+        "201":
+          description: Endpoint registered. The signing secret is shown exactly once.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  url: { type: string }
+                  secret: { type: string, example: "whsec_..." }
+                  created_at: { type: string, format: date-time }
